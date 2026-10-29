@@ -13,28 +13,67 @@
 
 package org.flowable.engine.impl.bpmn.diagram;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import org.flowable.common.engine.api.FlowableException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.w3c.dom.Document;
 
 public class ProcessDiagramLayoutFactoryTest {
 
-	@Test
-	public void testParseXmlXXEProtection() {
-		String maliciousBpmn = """
-    <?xml version="1.0" encoding="UTF-8"?>
-    <!DOCTYPE bpmn2:definitions [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-    <bpmn2:definitions id="&xxe;">
-    </bpmn2:definitions>""";
+    private final ProcessDiagramLayoutFactory factory = new ProcessDiagramLayoutFactory();
 
-		ProcessDiagramLayoutFactory factory = new ProcessDiagramLayoutFactory();
+    @Test
+    public void testExternalEntityInElementTextIsRejected(@TempDir Path tempDir) throws Exception {
+        // The entity must be referenced in element text content. In an attribute value the JDK
+        // rejects an external entity reference even when the parser is not hardened, so such a
+        // test would also pass without the fix.
+        Path secret = tempDir.resolve("secret.txt");
+        Files.writeString(secret, "TOP-SECRET-CONTENT");
 
-		assertThatThrownBy(() -> factory.parseXml(new ByteArrayInputStream(maliciousBpmn.getBytes(StandardCharsets.UTF_8))))
-			.isInstanceOf(FlowableException.class)
-			.hasMessageContaining("Error while parsing BPMN model");
-	}
+        String maliciousBpmn = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE definitions [<!ENTITY xxe SYSTEM "%s">]>
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                  <documentation>&xxe;</documentation>
+                </definitions>
+                """.formatted(secret.toUri());
+
+        assertThatThrownBy(() -> factory.parseXml(new ByteArrayInputStream(maliciousBpmn.getBytes(StandardCharsets.UTF_8))))
+                .isInstanceOf(FlowableException.class)
+                .hasMessageContaining("Error while parsing BPMN model");
+    }
+
+    @Test
+    public void testDoctypeIsRejected() {
+        String bpmnWithDoctype = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE definitions [<!ENTITY a "b">]>
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"/>
+                """;
+
+        assertThatThrownBy(() -> factory.parseXml(new ByteArrayInputStream(bpmnWithDoctype.getBytes(StandardCharsets.UTF_8))))
+                .isInstanceOf(FlowableException.class);
+    }
+
+    @Test
+    public void testValidBpmnStillParses() {
+        String validBpmn = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                  <process id="p1"/>
+                </definitions>
+                """;
+
+        Document document = factory.parseXml(new ByteArrayInputStream(validBpmn.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(document.getDocumentElement().getLocalName()).isEqualTo("definitions");
+    }
 }
